@@ -1,11 +1,16 @@
 """
-Голосовой ввод через Whisper с командами-активаторами.
+Голосовой ввод через Whisper — два режима работы:
 
-Скажите "слушай центральная" — начнётся запись.
-Скажите "конец связи" — запись остановится, текст вставится в активное поле.
+  Режим 1 — Голосовые команды (фоновый, без кнопок):
+    Скажите "слушай центральная" — начнётся запись.
+    Скажите "конец связи"        — запись остановится, текст вставится в активное поле.
+
+  Режим 2 — Кнопка F9 (удерживать):
+    Удерживайте F9 — идёт запись.
+    Отпустите F9   — текст вставится в активное поле.
 
 Требует установки:
-  pip install vosk sounddevice whisper pyperclip keyboard numpy
+  pip install vosk sounddevice openai-whisper pyperclip keyboard numpy
   Скачать модель Vosk для русского: https://alphacephei.com/vosk/models
   (vosk-model-small-ru-0.22 — маленькая и быстрая)
 """
@@ -32,6 +37,10 @@ STOP_PHRASE = "конец связи"
 
 # Минимальное расстояние Левенштейна для нечёткого совпадения фраз
 MATCH_THRESHOLD = 0.6
+
+# Режим работы: "voice" — голосовые команды, "hotkey" — кнопка F9
+MODE   = "voice"   # "voice" | "hotkey"
+HOTKEY = "f9"
 # ───────────────────────────────────────────────────────────────────────────
 
 
@@ -164,10 +173,45 @@ class VoiceAssistant:
             print("Ничего не распознано.\n")
 
 
+def run_hotkey_mode(whisper_model):
+    """Режим удержания F9: запись пока кнопка нажата."""
+    print(f"Режим кнопки. Удерживайте {HOTKEY.upper()} для записи речи.")
+    print("Ctrl+C — выход.\n")
+    while True:
+        keyboard.wait(HOTKEY)
+        print("Запись... (отпустите кнопку чтобы завершить)")
+        audio_frames = []
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+            while keyboard.is_pressed(HOTKEY):
+                data, _ = stream.read(1024)
+                audio_frames.append(data.copy())
+                time.sleep(0.01)
+        print("Распознавание...")
+        audio = np.concatenate(audio_frames, axis=0).flatten()
+        if len(audio) < SAMPLE_RATE * 0.3:
+            print("Слишком короткая запись, пропускаю.\n")
+            continue
+        result = whisper_model.transcribe(audio, language=LANGUAGE, fp16=False)
+        text = result["text"].strip()
+        if text:
+            print(f"Распознано: {text}")
+            pyperclip.copy(text)
+            keyboard.press_and_release("ctrl+v")
+        else:
+            print("Ничего не распознано.")
+        print()
+
+
 if __name__ == "__main__":
     try:
-        vosk_model, whisper_model = load_models()
-        assistant = VoiceAssistant(vosk_model, whisper_model)
-        assistant.run()
+        if MODE == "hotkey":
+            print(f"Загрузка Whisper модели '{WHISPER_MODEL}'...")
+            whisper_model = whisper.load_model(WHISPER_MODEL)
+            print("Готово!")
+            run_hotkey_mode(whisper_model)
+        else:
+            vosk_model, whisper_model = load_models()
+            assistant = VoiceAssistant(vosk_model, whisper_model)
+            assistant.run()
     except KeyboardInterrupt:
         print("\nВыход.")
