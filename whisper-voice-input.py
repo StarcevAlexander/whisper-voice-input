@@ -1,18 +1,18 @@
 """
-Голосовой ввод через Whisper — два режима работы:
+Голосовой ввод через Whisper — оба способа работают одновременно:
 
-  Режим 1 — Голосовые команды (фоновый, без кнопок):
+  Способ 1 — Голосовые команды:
     Скажите "центральная" — начнётся запись.
-    Скажите "марш"        — запись остановится, текст вставится в активное поле.
+    Скажите "исполнять"   — запись остановится, текст вставится в активное поле.
 
-  Режим 2 — Кнопка F9 (удерживать):
+  Способ 2 — Кнопка F9:
     Удерживайте F9 — идёт запись.
     Отпустите F9   — текст вставится в активное поле.
 
 Защита от повторного запуска: допускается только один экземпляр скрипта.
 
 Требует установки:
-  pip install vosk sounddevice openai-whisper pyperclip keyboard numpy
+  pip install vosk sounddevice openai-whisper pyperclip keyboard numpy pygame
   Скачать модель Vosk для русского: https://alphacephei.com/vosk/models
   (vosk-model-small-ru-0.22 — маленькая и быстрая)
 """
@@ -29,7 +29,7 @@ import sounddevice as sd
 import whisper
 import pyperclip
 import keyboard
-import pyttsx3
+import pygame
 from vosk import Model, KaldiRecognizer
 
 # ── Настройки ──────────────────────────────────────────────────────────────
@@ -39,34 +39,35 @@ SAMPLE_RATE     = 16000
 LANGUAGE        = "ru"
 
 WAKE_PHRASE = "центральная"
-STOP_PHRASE = "марш"
+STOP_PHRASE = "исполнять"
 
 # Минимальное расстояние Левенштейна для нечёткого совпадения фраз
 MATCH_THRESHOLD = 0.6
 
-# Режим работы: "voice" — голосовые команды, "hotkey" — кнопка F9
-MODE   = "voice"   # "voice" | "hotkey"
 HOTKEY = "f9"
 
-# Голосовые ответы системы
-REPLY_START = "слушаю, господин"
-REPLY_DONE  = "будет исполнено"
 # ───────────────────────────────────────────────────────────────────────────
 
-# ── TTS-движок ────────────────────────────────────────────────────────────
-_tts_engine = pyttsx3.init()
-_tts_engine.setProperty("rate", 190)
-# Выбираем русский голос, если доступен
-for _v in _tts_engine.getProperty("voices"):
-    if "ru" in (_v.languages[0] if _v.languages else "") or "russian" in _v.name.lower():
-        _tts_engine.setProperty("voice", _v.id)
-        break
+# ── Звуковые сигналы ─────────────────────────────────────────────────────
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SOUND_START = os.path.join(_SCRIPT_DIR, "sound_done.mp3")
+SOUND_DONE  = os.path.join(_SCRIPT_DIR, "sound_start.mp3")
+
+pygame.mixer.init()
+_sound_lock = threading.Lock()
 
 
-def say(text: str):
-    """Произносит фразу через системный TTS."""
-    _tts_engine.say(text)
-    _tts_engine.runAndWait()
+def play_sound(path: str, wait: bool = True):
+    """Проигрывает mp3-файл. wait=True — ждёт окончания воспроизведения."""
+    with _sound_lock:
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
+            if wait:
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.05)
+        except Exception as e:
+            print(f"[Sound] Ошибка воспроизведения: {e}")
 
 
 def levenshtein_ratio(a: str, b: str) -> float:
@@ -112,12 +113,13 @@ def load_models():
 
 
 class VoiceAssistant:
-    def __init__(self, vosk_model, whisper_model):
+    def __init__(self, vosk_model, whisper_model, busy_lock):
         self.vosk_model    = vosk_model
         self.whisper_model = whisper_model
         self.state         = "waiting"   # waiting | recording
         self.record_frames = []
         self.audio_queue   = queue.Queue()
+        self.busy_lock     = busy_lock   # общий lock с hotkey-потоком
 
     def _recognizer(self):
         return KaldiRecognizer(self.vosk_model, SAMPLE_RATE)
@@ -157,20 +159,24 @@ class VoiceAssistant:
 
                 if self.state == "waiting":
                     if phrase_in_text(WAKE_PHRASE, result_text):
-                        print(f'[Vosk] Услышано: "{result_text}"')
-                        say(REPLY_START)
-                        print("Запись началась... Говорите!")
+                        if not self.busy_lock.acquire(blocking=False):
+                            print("[Voice] Пропуск: F9 режим занят")
+                            continue
+                        print(f'[Voice] Услышано: "{result_text}" → активация')
+                        play_sound(SOUND_START)
+                        print("[Voice] Запись началась... Говорите!")
                         self.state = "recording"
                         self.record_frames = []
-                        rec = self._recognizer()  # сброс распознавателя
+                        rec = self._recognizer()
 
                 elif self.state == "recording":
                     if phrase_in_text(STOP_PHRASE, result_text):
-                        print(f'[Vosk] Услышано: "{result_text}"')
-                        print("Запись остановлена. Распознаю через Whisper...")
+                        print(f'[Voice] Услышано: "{result_text}" → стоп')
+                        print(f"[Voice] Фреймов записано: {len(self.record_frames)}")
                         self.state = "waiting"
                         self._transcribe_and_paste()
-                        say(REPLY_DONE)
+                        play_sound(SOUND_DONE)
+                        self.busy_lock.release()
                         rec = self._recognizer()
 
     def _transcribe_and_paste(self):
@@ -187,7 +193,7 @@ class VoiceAssistant:
         text = result["text"].strip()
 
         # Убираем стоп-фразу из конца, если Whisper её тоже захватил
-        for stop in [STOP_PHRASE, "конец"]:
+        for stop in [STOP_PHRASE, "исполнять", "исполняй", "конец"]:
             idx = text.lower().rfind(stop)
             if idx != -1:
                 text = text[:idx].strip()
@@ -200,35 +206,56 @@ class VoiceAssistant:
             print("Ничего не распознано.\n")
 
 
-def run_hotkey_mode(whisper_model):
-    """Режим удержания F9: запись пока кнопка нажата."""
-    print(f"Режим кнопки. Удерживайте {HOTKEY.upper()} для записи речи.")
-    print("Ctrl+C — выход.\n")
+def run_hotkey_mode(whisper_model, busy_lock):
+    """Режим удержания F9: удерживать — запись, отпустить — распознавание."""
     while True:
         keyboard.wait(HOTKEY)
-        say(REPLY_START)
-        print("Запись... (отпустите кнопку чтобы завершить)")
-        audio_frames = []
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
-            while keyboard.is_pressed(HOTKEY):
-                data, _ = stream.read(1024)
-                audio_frames.append(data.copy())
-                time.sleep(0.01)
-        print("Распознавание...")
-        audio = np.concatenate(audio_frames, axis=0).flatten()
-        if len(audio) < SAMPLE_RATE * 0.3:
-            print("Слишком короткая запись, пропускаю.\n")
+        print("[F9] Нажата клавиша")
+
+        if not busy_lock.acquire(blocking=False):
+            print("[F9] Пропуск: голосовой режим занят")
             continue
-        result = whisper_model.transcribe(audio, language=LANGUAGE, fp16=False)
-        text = result["text"].strip()
-        if text:
-            print(f"Распознано: {text}")
-            pyperclip.copy(text)
-            keyboard.press_and_release("ctrl+v")
-            say(REPLY_DONE)
-        else:
-            print("Ничего не распознано.")
-        print()
+
+        try:
+            # Стартовый звук в фоне — не блокирует начало записи
+            play_sound(SOUND_START, wait=False)
+
+            print("[F9] Запись... (удерживайте, отпустите для остановки)")
+            audio_frames = []
+            with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+                while keyboard.is_pressed(HOTKEY):
+                    data, _ = stream.read(1024)
+                    audio_frames.append(data.copy())
+                    time.sleep(0.005)
+
+            print(f"[F9] Кнопка отпущена. Фреймов: {len(audio_frames)}")
+
+            if not audio_frames:
+                print("[F9] Пустая запись, пропускаю.")
+                continue
+
+            audio = np.concatenate(audio_frames, axis=0).flatten()
+            duration = len(audio) / SAMPLE_RATE
+            print(f"[F9] Длительность: {duration:.1f}с")
+
+            if duration < 0.3:
+                print("[F9] Слишком короткая запись, пропускаю.")
+                continue
+
+            print("[F9] Распознавание через Whisper...")
+            result = whisper_model.transcribe(audio, language=LANGUAGE, fp16=False)
+            text = result["text"].strip()
+            print(f"[F9] Whisper вернул: '{text}'")
+
+            if text:
+                pyperclip.copy(text)
+                keyboard.press_and_release("ctrl+v")
+                print(f"[F9] Текст вставлен: {text}")
+                play_sound(SOUND_DONE)
+            else:
+                print("[F9] Ничего не распознано.")
+        finally:
+            busy_lock.release()
 
 
 def ensure_single_instance():
@@ -246,14 +273,20 @@ def ensure_single_instance():
 if __name__ == "__main__":
     _lock = ensure_single_instance()
     try:
-        if MODE == "hotkey":
-            print(f"Загрузка Whisper модели '{WHISPER_MODEL}'...")
-            whisper_model = whisper.load_model(WHISPER_MODEL)
-            print("Готово!")
-            run_hotkey_mode(whisper_model)
-        else:
-            vosk_model, whisper_model = load_models()
-            assistant = VoiceAssistant(vosk_model, whisper_model)
-            assistant.run()
+        vosk_model, whisper_model = load_models()
+        busy_lock = threading.Lock()
+
+        # F9 в отдельном потоке
+        hotkey_thread = threading.Thread(
+            target=run_hotkey_mode,
+            args=(whisper_model, busy_lock),
+            daemon=True,
+        )
+        hotkey_thread.start()
+        print(f"[F9] Кнопка {HOTKEY.upper()} активна.")
+
+        # Голосовые команды в основном потоке
+        assistant = VoiceAssistant(vosk_model, whisper_model, busy_lock)
+        assistant.run()
     except KeyboardInterrupt:
         print("\nВыход.")
