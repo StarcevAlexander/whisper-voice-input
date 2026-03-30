@@ -2,12 +2,14 @@
 Голосовой ввод через Whisper — два режима работы:
 
   Режим 1 — Голосовые команды (фоновый, без кнопок):
-    Скажите "слушай центральная" — начнётся запись.
-    Скажите "конец связи"        — запись остановится, текст вставится в активное поле.
+    Скажите "центральная" — начнётся запись.
+    Скажите "марш"        — запись остановится, текст вставится в активное поле.
 
   Режим 2 — Кнопка F9 (удерживать):
     Удерживайте F9 — идёт запись.
     Отпустите F9   — текст вставится в активное поле.
+
+Защита от повторного запуска: допускается только один экземпляр скрипта.
 
 Требует установки:
   pip install vosk sounddevice openai-whisper pyperclip keyboard numpy
@@ -15,9 +17,12 @@
   (vosk-model-small-ru-0.22 — маленькая и быстрая)
 """
 
+import sys
+import os
 import time
 import queue
 import threading
+import msvcrt
 import json
 import numpy as np
 import sounddevice as sd
@@ -32,8 +37,8 @@ VOSK_MODEL_PATH = r"C:\Users\master\vosk-model-small-ru-0.22"
 SAMPLE_RATE     = 16000
 LANGUAGE        = "ru"
 
-WAKE_PHRASE = "слушай центральная"
-STOP_PHRASE = "конец связи"
+WAKE_PHRASE = "центральная"
+STOP_PHRASE = "марш"
 
 # Минимальное расстояние Левенштейна для нечёткого совпадения фраз
 MATCH_THRESHOLD = 0.6
@@ -202,7 +207,20 @@ def run_hotkey_mode(whisper_model):
         print()
 
 
+def ensure_single_instance():
+    """Гарантирует, что запущен только один экземпляр скрипта."""
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".lock")
+    try:
+        lock_file = open(lock_path, "w")
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        return lock_file  # держим файл открытым
+    except (OSError, IOError):
+        print("Скрипт уже запущен. Выход.")
+        sys.exit(0)
+
+
 if __name__ == "__main__":
+    _lock = ensure_single_instance()
     try:
         if MODE == "hotkey":
             print(f"Загрузка Whisper модели '{WHISPER_MODEL}'...")
