@@ -29,6 +29,7 @@ import sounddevice as sd
 import whisper
 import pyperclip
 import keyboard
+import pyttsx3
 from vosk import Model, KaldiRecognizer
 
 # ── Настройки ──────────────────────────────────────────────────────────────
@@ -46,7 +47,26 @@ MATCH_THRESHOLD = 0.6
 # Режим работы: "voice" — голосовые команды, "hotkey" — кнопка F9
 MODE   = "voice"   # "voice" | "hotkey"
 HOTKEY = "f9"
+
+# Голосовые ответы системы
+REPLY_START = "слушаю, господин"
+REPLY_DONE  = "будет исполнено"
 # ───────────────────────────────────────────────────────────────────────────
+
+# ── TTS-движок ────────────────────────────────────────────────────────────
+_tts_engine = pyttsx3.init()
+_tts_engine.setProperty("rate", 190)
+# Выбираем русский голос, если доступен
+for _v in _tts_engine.getProperty("voices"):
+    if "ru" in (_v.languages[0] if _v.languages else "") or "russian" in _v.name.lower():
+        _tts_engine.setProperty("voice", _v.id)
+        break
+
+
+def say(text: str):
+    """Произносит фразу через системный TTS."""
+    _tts_engine.say(text)
+    _tts_engine.runAndWait()
 
 
 def levenshtein_ratio(a: str, b: str) -> float:
@@ -138,6 +158,7 @@ class VoiceAssistant:
                 if self.state == "waiting":
                     if phrase_in_text(WAKE_PHRASE, result_text):
                         print(f'[Vosk] Услышано: "{result_text}"')
+                        say(REPLY_START)
                         print("Запись началась... Говорите!")
                         self.state = "recording"
                         self.record_frames = []
@@ -149,6 +170,7 @@ class VoiceAssistant:
                         print("Запись остановлена. Распознаю через Whisper...")
                         self.state = "waiting"
                         self._transcribe_and_paste()
+                        say(REPLY_DONE)
                         rec = self._recognizer()
 
     def _transcribe_and_paste(self):
@@ -184,6 +206,7 @@ def run_hotkey_mode(whisper_model):
     print("Ctrl+C — выход.\n")
     while True:
         keyboard.wait(HOTKEY)
+        say(REPLY_START)
         print("Запись... (отпустите кнопку чтобы завершить)")
         audio_frames = []
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
@@ -202,6 +225,7 @@ def run_hotkey_mode(whisper_model):
             print(f"Распознано: {text}")
             pyperclip.copy(text)
             keyboard.press_and_release("ctrl+v")
+            say(REPLY_DONE)
         else:
             print("Ничего не распознано.")
         print()
